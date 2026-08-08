@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: |
+          uv venv --python 3.12
+          uv pip install --python .venv/bin/python -r requirements.txt
+
+      - name: Run tests (unit, sin infra)
+        run: |
+          env -u PYTHONPATH .venv/bin/python -m pytest tests -q -m "not integration"
+
+      - name: Syntax check scripts
+        run: |
+          bash -n scripts/autopilot.sh
+
+      - name: Validate systemd units (best effort)
+        run: |
+          systemd-analyze verify scripts/systemd/kos-autopilot.service scripts/systemd/kos-autopilot.timer || echo "aviso: systemd-analyze no disponible en runner"
+
+      - name: Verify no secrets staged
+        run: |
+          git ls-files | grep -E "(^|/)\.env$|backup.*\.sql$" && exit 1 || echo "OK: sin secretos"

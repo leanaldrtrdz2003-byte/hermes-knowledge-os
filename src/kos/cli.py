@@ -56,9 +56,13 @@ def cmd_ingest(args) -> None:
         workdir = cfg.data_dir / "staging"
         workdir.mkdir(parents=True, exist_ok=True)
         n = 0
+        limit = getattr(args, "limit", 0) or 0
         for p in sorted(root.rglob("*")):
             if not p.is_file():
                 continue
+            if limit > 0 and n >= limit:
+                log.info("ingest: límite de %d docs alcanzado (backpressure)", limit)
+                break
             try:
                 security.validate_file(p)
             except Exception as exc:  # noqa: BLE001
@@ -73,6 +77,9 @@ def cmd_ingest(args) -> None:
             }
             if await pipeline.process_document(doc, workdir):
                 n += 1
+                if limit > 0 and n >= limit:
+                    log.info("ingest: límite de %d docs alcanzado (backpressure)", limit)
+                    break
         print(f"ingest: {n} documentos nuevos encolados en {root}")
     asyncio.run(_run())
 
@@ -81,7 +88,12 @@ def cmd_worker(args) -> None:
     from kos import pipeline
 
     async def _run():
-        await pipeline.worker_loop(args.worker_id or "w1", once=args.once)
+        await pipeline.worker_loop(
+            args.worker_id or "w1",
+            once=args.once,
+            concurrency=getattr(args, "concurrency", 1) or 1,
+            rate_limit=getattr(args, "rate_limit", 0.0) or 0.0,
+        )
     asyncio.run(_run())
 
 
@@ -209,10 +221,16 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
     p_ingest = sub.add_parser("ingest"); p_ingest.add_argument("dir")
+    p_ingest.add_argument("--limit", type=int, default=0,
+                          help="máx de documentos nuevos por corrida (backpressure); 0 = sin límite")
     p_worker = sub.add_parser("worker")
     p_worker.add_argument("--worker-id", default="w1")
     p_worker.add_argument("--once", action="store_true",
                           help="una ronda: termina al vaciar la cola actual (no hace polling)")
+    p_worker.add_argument("--concurrency", type=int, default=1,
+                          help="jobs en paralelo por worker (1 = secuencial)")
+    p_worker.add_argument("--rate-limit", type=float, default=0.0,
+                          help="pausa en segundos tras cada job (backpressure simple)")
     p_query = sub.add_parser("query"); p_query.add_argument("question"); p_query.add_argument("--mode", default="hybrid")
     p_mem = sub.add_parser("memory"); p_mem.add_argument("observation", nargs="?"); p_mem.add_argument("--top", type=int)
     sub.add_parser("wiki")

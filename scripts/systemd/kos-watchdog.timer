@@ -1,0 +1,9 @@
+[Unit]
+Description=Watchdog diario del KOS (07:45 — comprueba la corrida de las 03:30)
+
+[Timer]
+OnCalendar=*-*-* 07:45:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

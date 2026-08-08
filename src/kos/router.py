@@ -57,7 +57,7 @@ def context_for(hits: list[dict]) -> str:
     return "\n".join(blocks)[:14000]
 
 
-async def answer(question: str, mode: str = "hybrid") -> dict:
+async def answer(question: str, mode: str = "hybrid", history: list | None = None) -> dict:
     t0 = time.time()
     qtype = classify(question)
     hits = await search_chunks(question, top_k=10)
@@ -94,11 +94,19 @@ async def answer(question: str, mode: str = "hybrid") -> dict:
             "\n\nMEMORIA PERSISTIDA:\n" + mem_blk + f"\n\nPREGUNTA: {question}"
         )
     else:
+        history_blk = ""
+        if history:
+            lines = []
+            for turn in history[-6:]:
+                role = "USUARIO" if turn.get("role") == "user" else "ASISTENTE"
+                lines.append(f"{role}: {str(turn.get('content', ''))[:400]}")
+            history_blk = "\n\nHISTORIAL RECIENTE:\n" + "\n".join(lines)
         prompt = (
             "Responde a la PREGUNTA usando SOLO la evidencia entre external_source.\n"
             "Estructura: respuesta, luego 'Fuentes:' con [Source: doc_id] [Chunk: chunk_id].\n"
             "Si la evidencia es insuficiente o contradictoria, dilo explícitamente.\n\n"
-            f"EVIDENCIA:\n{ctx}\n\nRAG GRÁFICO:\n{rag_part}\n\nPREGUNTA: {question}"
+            f"EVIDENCIA:\n{ctx}\n\nRAG GRÁFICO:\n{rag_part}"
+            f"{history_blk}\n\nPREGUNTA: {question}"
         )
 
     response = await complete(prompt, system=system, stage="router",

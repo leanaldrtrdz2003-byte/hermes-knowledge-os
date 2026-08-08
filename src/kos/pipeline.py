@@ -220,28 +220,66 @@ async def process_document(doc: dict, workdir: Path) -> dict | None:
     return src
 
 
-async def worker_loop(worker_id: str = "w1", *, once: bool = False) -> None:
-    """Consume jobs de la cola hasta vaciarla (o una ronda si once=True)."""
+async def _process_job(job: dict, workdir: Path) -> str:
+    """Ejecuta un job con su manejo de errores; devuelve un resumen corto."""
+    t0 = time.time()
+    try:
+        await run_stage(job["job_type"], job, workdir)
+        await db.finish_job(job["job_id"], ok=True)
+        await db.doc_status(job["doc_id"], "kos", STAGE_STATUS.get(job["job_type"], "ready"), "done")
+        log.info("job %s/%s OK (%.1fs)", job["job_type"], job["doc_id"], time.time() - t0)
+        return "ok"
+    except (FileNotFoundError, ValueError) as exc:  # noqa: BLE001
+        log.warning("job %s/%s SALTA: %s", job["job_type"], job["doc_id"], exc)
+        await db.finish(job["job_id"], ok=True, error=str(exc)[:200])
+        await db.mark_job_skipped(job["job_id"])
+        return "skip"
+    except Exception as exc:  # noqa: BLE001
+        log.exception("job %s/%s FAILED", job["job_type"], job["doc_id"])
+        await db.finish(job["job_id"], ok=False, error=str(exc)[:500])
+        return "fail"
+
+
+async def worker_loop(
+    worker_id: str = "w1",
+    *,
+    once: bool = False,
+    concurrency: int = 1,
+    rate_limit: float = 0.0,
+) -> None:
+    """Consume jobs de la cola hasta vaciarla (o una ronda si once=True).
+
+    - ``concurrency``: jobs en paralelo (asyncio.gather); útil con varios
+      documentos grandes — el parse/embed reparte entre tasks.
+    - ``rate_limit``: pausa (segundos) tras cada job — backpressure simple
+      para no saturar el LLM/embeddings en ráfagas.
+    """
     workdir = settings.data_dir / "staging"
     workdir.mkdir(parents=True, exist_ok=True)
     await db.reset_stale_jobs()  # jobs 'running' huérfanos → 'queued' (reanudable)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    doing: set[asyncio.Task] = set()
+
+    async def _guarded(job: dict):
+        async with sem:
+            return await _process_job(job, workdir)
+
     while True:
-        job = await db.claim_job(worker_id, list(STAGE_ORDER))
-        if job is None:
+        # rellenar el lote hasta el tope de concurrencia
+        while len(doing) < max(1, concurrency):
+            job = await db.claim_job(worker_id, list(STAGE_ORDER))
+            if job is None:
+                break
+            doing.add(asyncio.create_task(_guarded(job)))
+            if rate_limit > 0 and len(doing) == 1:
+                await asyncio.sleep(rate_limit)
+        if not doing:
             if once:
                 return
             await asyncio.sleep(settings.job_poll_seconds)
             continue
-        t0 = time.time()
-        try:
-            await run_stage(job["job_type"], job, workdir)
-            await db.finish_job(job["job_id"], ok=True)
-            await db.doc_status(job["doc_id"], "kos", STAGE_STATUS.get(job["job_type"], "ready"), "done")
-            log.info("job %s/%s OK (%.1fs)", job["job_type"], job["doc_id"], time.time() - t0)
-        except (FileNotFoundError, ValueError) as exc:  # noqa: BLE001
-            log.warning("job %s/%s SALTA: %s", job["job_type"], job["doc_id"], exc)
-            await db.finish(job["job_id"], ok=True, error=str(exc)[:200])
-            await db.mark_job_skipped(job["job_id"])
-        except Exception as exc:  # noqa: BLE001
-            log.exception("job %s/%s FAILED", job["job_type"], job["doc_id"])
-            await db.finish(job["job_id"], ok=False, error=str(exc)[:500])
+        # recoger el primero que termine
+        done, doing = await asyncio.wait(doing, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            t.result()  # noqa: B904 — _process_job ya no lanza
+    return

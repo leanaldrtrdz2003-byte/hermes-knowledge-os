@@ -24,7 +24,33 @@ for a in "$@"; do
 done
 
 echo "[autopilot $(date +%H:%M:%S)] ingesta: data/raw ${EXTRA[*]:-}" >> "$LOG"
+
+# Conteo de docs ANTES (para regeneración selectiva de wiki/grafo/dashboard)
+N_DOCS_ANTES=$("${PY[@]}" - <<'PYEOF' 2>> "$LOG" || echo 0
+import asyncio, sys
+sys.path.insert(0, "src")
+from kos import db
+async def main():
+    pool = await db.get_pool()
+    return await pool.fetchval("SELECT COUNT(*) FROM documents")
+print(asyncio.run(main()) or 0)
+PYEOF
+)
+
 "${PY[@]}" src/kos/cli.py ingest data/raw "${EXTRA[@]}" >> "$LOG" 2>&1 || true
+
+# ¿Hubo docs nuevos? (regeneración selectiva: wiki/grafo/dashboard solo si cambió algo)
+NOVEDADES=$("${PY[@]}" - "$N_DOCS_ANTES" <<'PYEOF' 2>> "$LOG" || echo 0
+import asyncio, sys
+sys.path.insert(0, "src")
+from kos import db
+async def main():
+    pool = await db.get_pool()
+    now = await pool.fetchval("SELECT COUNT(*) FROM documents")
+    return 1 if now > int(sys.argv[1]) else 0
+print(asyncio.run(main()))
+PYEOF
+)
 echo "[autopilot $(date +%H:%M:%S)] worker iniciado" >> "$LOG"
 
 # El worker procesa la cola y termina cuando queda vacía (bucle de guardia).
@@ -44,9 +70,15 @@ PYEOF
   sleep 10
 done
 
-"${PY[@]}" src/kos/cli.py wiki >> "$LOG" 2>&1 || true
-"${PY[@]}" src/kos/cli.py graph --dir vault/04_GRAPH >> "$LOG" 2>&1 || true
-"${PY[@]}" scripts/dashboard_md.py >> "$LOG" 2>&1 || true
+# Regeneración selectiva: wiki/grafo/dashboard solo si hubo documentos nuevos
+# (ahorra LLM y no toca artefactos si nada cambió — el dedupe por hash decide).
+if [ "${NOVEDADES:-0}" -eq 1 ]; then
+  "${PY[@]}" src/kos/cli.py wiki >> "$LOG" 2>&1 || true
+  "${PY[@]}" src/kos/cli.py graph --dir vault/04_GRAPH >> "$LOG" 2>&1 || true
+  "${PY[@]}" scripts/dashboard_md.py >> "$LOG" 2>&1 || true
+else
+  echo "[autopilot $(date +%H:%M:%S)] sin novedades — wiki/grafo/dashboard intactos" >> "$LOG"
+fi
 
 if [ "$DO_BACKUP" -eq 1 ]; then
   "${PY[@]}" src/kos/cli.py backup >> "$LOG" 2>&1 || true

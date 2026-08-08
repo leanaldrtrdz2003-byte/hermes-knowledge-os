@@ -214,13 +214,29 @@ print(resp["answer"])          # síntesis
 print(resp["evidence_n"])      # nº de chunks citados
 ```
 
+### API HTTP (agentes sin CLI)
+
+Levanta un servidor HTTP (stdlib, sin dependencias extra) para que Hermes,
+Claude u otros agentes consulten el KOS sin `subprocess`:
+
+```bash
+env -u PYTHONPATH .venv/bin/python src/kos/server.py --host 127.0.0.1 --port 8747
+curl http://127.0.0.1:8747/health          # estado: db, documents, queue
+curl -X POST http://127.0.0.1:8747/query \
+  -d '{"question":"¿…?","mode":"hybrid","session_id":"mi-sesion"}'
+```
+
+- `session_id` opcional: mantiene **memoria conversacional** (los últimos 6
+  turnos se inyectan al prompt); responde con el mismo `session_id`.
+- `GET /stats` expone las métricas del dashboard (JSON).
+
 ---
 
 ## Automatización
 
 El script `scripts/autopilot.sh` hace todo el ciclo (ingesta incremental +
-worker + wiki/grafo/dashboard + backup). Actívalo a diario con **systemd** o
-cron:
+worker + wiki/grafo/dashboard **solo si hubo novedades** + backup). Actívalo
+a diario con **systemd** o cron:
 
 ```bash
 # systemd (Linux) — timer diario a las 03:30
@@ -230,6 +246,15 @@ systemctl --user enable --now kos-autopilot.timer
 
 # o cron clásico
 crontab -e   # →  0 3 * * * ~/hermes-knowledge-os/scripts/autopilot.sh >> /tmp/kos-cron.log 2>&1
+```
+
+**Watchdog de salud** (`scripts/watchdog.sh`): comprueba que el autopilot
+corrió en las últimas 26 h y que el corpus no esté vacío; sale con código 1 y
+lista los problemas. Útil como segundo timer (07:45):
+
+```bash
+cp scripts/systemd/kos-watchdog.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now kos-watchdog.timer
 ```
 
 ---
@@ -275,7 +300,10 @@ Los backups también se generan solos cada carrera del autopilot.
 
 ## Escalado
 
-- Más workers: la cola de jobs está en PostgreSQL, lanza N procesadores `worker --worker-id`
+- Más workers: la cola de jobs está en PostgreSQL, lanza N procesadores
+  `worker --worker-id` o usa `--concurrency N` dentro de un worker
+  (paralelismo con semáforo). `ingest --limit N` da backpressure por corrida
+  (no volcar 10k docs en una noche) y `worker --rate-limit S` espacia los jobs.
 - Embeddings: mover a servicio remoto cambiando `EMBEDDING_BASE_URL`
 - 1.000.000 chunks: PG + Qdrant aguantan sin tuneo previo; monitoriza con
   `make dashboard` (15 métricas)
@@ -298,12 +326,22 @@ Los backups también se generan solos cada carrera del autopilot.
 | F9 | Backup/restore | ✅ |
 | F10 | Benchmark 3 estrategias | ✅ |
 | F11 | Automatización + docs | ✅ |
+| A/B/C | Mejoras post-F11 (CI, backpressure, dominios, API HTTP, watchdog) | ✅ |
 
 ---
 
 ## Integrar con tu agente
 
-La vía más simple: el agente usa el CLI como herramienta.
+La vía recomendada es la **API HTTP** (servidor sin estado, sin subprocess):
+```python
+import httpx
+def kos_query(pregunta: str, session: str | None = None) -> str:
+    r = httpx.post("http://127.0.0.1:8747/query",
+                   json={"question": pregunta, "mode": "hybrid",
+                         "session_id": session}, timeout=600)
+    return r.json()["answer"]
+```
+La vía simple sigue disponible: el agente usa el CLI como herramienta.
 
 ```python
 # en tu proveedor de herramientas

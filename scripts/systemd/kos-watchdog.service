@@ -1,0 +1,9 @@
+[Unit]
+Description=Watchdog del Knowledge OS (salud + corpus)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/hermes-knowledge-os
+ExecStart=%h/hermes-knowledge-os/scripts/watchdog.sh --cron
+Environment=PYTHONUNBUFFERED=1

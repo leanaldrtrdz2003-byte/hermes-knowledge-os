@@ -22,6 +22,8 @@ from kos.llm import complete
 
 log = logging.getLogger("kos.graph")
 
+MAX_LLM_RETRIES = 2  # reintentos de extracción LLM antes de degradar a vacío
+
 EXTRACTION_SCHEMA = {
     "nodes": [{"id": str, "label": str, "source_file": str, "source_location": str}],
     "edges": [{"source": str, "target": str, "relation": str, "confidence": str}],
@@ -41,7 +43,12 @@ async def extract_code(corpus_dir: Path, cache_root: Path | None = None) -> dict
 
 
 async def extract_docs_llm(title: str, text: str) -> dict:
-    """Paso 2 — entidades/relaciones de documentos vía LLM local (§22 cheap)."""
+    """Paso 2 — entidades/relaciones de documentos vía LLM (§22 cheap).
+
+    Con reintento: si el LLM devuelve JSON inválido o un fragmento inutilizable,
+    se reintenta una vez indicando el error; al segundo fallo se degrada a un
+    fragmento vacío (sin tumbar el pipeline).
+    """
     sys_prompt = (
         "Eres un extractor de conocimiento. RESPUESTA: ÚNICAMENTE un objeto JSON "
         "válido, sin markdown, sin explicación, sin texto fuera del JSON."
@@ -50,48 +57,90 @@ async def extract_docs_llm(title: str, text: str) -> dict:
     Devuelve SOLO JSON con este schema:
     {{"nodes":[{{"id":"id_unico","label":"nombre humano","source_file":"{title}","source_location":"L1"}}],
      "edges":[{{"source":"id_a","target":"id_b","relation":"prerequisite_of|requires|teaches|explains|example_of|application_of|contradicts|extends|related_to|part_of|uses","confidence":"EXTRACTED|INFERRED|AMBIGUOUS"}}]}}
-    Reglas: ids estables tipo slug (p.ej. "calculo_integral"); max 25 nodos; solo relaciones con base en el texto.
+    Reglas: ids estables tipo slug (p.ej. "calculo_integral"); max 25 nodos; solo relaciones con base en el texto; cada edge debe referenciar ids existentes en nodes.
     DOCUMENTO:
     {text}"""
-    raw = await complete(prompt, system=sys_prompt, max_tokens=2000)
-    frag = _parse_fragment(raw, title)
-    return frag
+    for attempt in range(1, MAX_LLM_RETRIES + 1):
+        raw = await complete(prompt, system=sys_prompt, max_tokens=2000)
+        frag, issues = _parse_fragment(raw, title)
+        if frag is not None:
+            return frag
+        log.warning(
+            "extract LLM inválido (intento %d/%d) para %s: %s",
+            attempt, MAX_LLM_RETRIES, title, "; ".join(issues),
+        )
+        if attempt < MAX_LLM_RETRIES:
+            prompt += (
+                "\nAVISO: tu respuesta anterior NO era JSON válido o tenía "
+                "edges sin nodos. Devuelve ÚNICAMENTE JSON válido según el schema "
+                "y respeta los ids declarados en nodes."
+            )
+    return {"nodes": [], "edges": []}
 
 
-def _parse_fragment(raw: str, title: str) -> dict:
-    """Parseo tolerante del JSON del LLM; ante fallo devuelve fragmento vacío."""
+def _parse_fragment(raw: str, title: str) -> tuple[dict | None, list[str]]:
+    """Parseo tolerante del JSON del LLM.
+
+    Devuelve ``(frag, errores)``: ``frag`` es ``None`` si el JSON es inválido o
+    inutilizable (sin nodos), o el fragmento saneado con edges huérfanos
+    descartados y límites aplicados.
+    """
+    errors: list[str] = []
     try:
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end == -1:
-            raise ValueError("sin JSON")
+            raise ValueError("sin objeto JSON")
         data = json.loads(raw[start : end + 1])
-        nodes = []
-        for n in data.get("nodes", [])[:30]:
-            nodes.append(
-                {
-                    "id": str(n.get("id", "")).strip() or "unknown",
-                    "label": str(n.get("label", n.get("id", "")))[:200],
-                    "source_file": str(n.get("source_file", title)),
-                    "source_location": str(n.get("source_location", "L1")),
-                }
-            )
-        edges = []
-        for e in data.get("edges", [])[:60]:
-            conf = str(e.get("confidence", "INFERRED")).upper()
-            if conf not in {"EXTRACTED", "INFERRED", "AMBIGUOUS"}:
-                conf = "INFERRED"
-            edges.append(
-                {
-                    "source": str(e.get("source", "")),
-                    "target": str(e.get("target", "")),
-                    "relation": str(e.get("relation", "related_to"))[:80],
-                    "confidence": conf,
-                }
-            )
-        return {"nodes": nodes, "edges": edges}
-    except Exception:  # noqa: BLE001
-        log.warning("fragmento LLM no parseable para %s", title)
-        return {"nodes": [], "edges": []}
+    except (ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"JSON inválido: {exc}")
+        return None, errors
+
+    seen_ids: set[str] = set()
+    nodes = []
+    for n in data.get("nodes", [])[:30]:
+        nid = str(n.get("id", "")).strip()
+        if not nid or nid == "unknown":
+            errors.append("nodo sin id descartado")
+            continue
+        if nid in seen_ids:
+            errors.append(f"nodo duplicado descartado: {nid}")
+            continue
+        seen_ids.add(nid)
+        nodes.append(
+            {
+                "id": nid,
+                "label": str(n.get("label", nid))[:200].strip() or nid,
+                "source_file": str(n.get("source_file", title)),
+                "source_location": str(n.get("source_location", "L1")),
+            }
+        )
+
+    edges: list[dict] = []
+    for e in data.get("edges", [])[:60]:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src or not tgt:
+            errors.append("edge sin source/target descartado")
+            continue
+        if src not in seen_ids or tgt not in seen_ids:
+            errors.append(f"edge huérfano descartado: {src}->{tgt}")
+            continue
+        conf = str(e.get("confidence", "INFERRED")).upper()
+        if conf not in {"EXTRACTED", "INFERRED", "AMBIGUOUS"}:
+            conf = "INFERRED"
+        edges.append(
+            {
+                "source": src,
+                "target": tgt,
+                "relation": str(e.get("relation", "related_to"))[:80],
+                "confidence": conf,
+            }
+        )
+
+    if not nodes:
+        errors.append("0 nodos extraídos — fragmento inutilizable")
+        return None, errors
+    return {"nodes": nodes, "edges": edges}, errors
 
 
 async def build_graph(corpus_dir: Path, *, cache_root: Path | None = None,
@@ -108,10 +157,16 @@ async def build_graph(corpus_dir: Path, *, cache_root: Path | None = None,
 
 
 def export_graph(G, out_dir: Path) -> dict:
-    """Paso 4 — artefactos: graph.json, vault Obsidian, HTML/SVG, reporte."""
+    """Paso 4 — artefactos: graph.json, vault Obsidian, HTML/SVG, reporte.
+
+    Añade a cada nodo su ``domain`` (derivado de ``source_file`` relativo a
+    data/raw — el primer nivel del path es la carpeta de dominio) y escribe
+    un resumen por dominios ``domains.json``.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     communities = gx_cluster(G)  # dict[int, list[str]]; G ya lleva atributo de comunidad
     to_json(G, communities, str(out_dir / "graph.json"))
+    _annotate_domains(out_dir / "graph.json")
     reports = {}
     try:
         to_obsidian(G, communities, str(out_dir))
@@ -127,6 +182,41 @@ def export_graph(G, out_dir: Path) -> dict:
         log.warning("export viz: %s", exc)
         reports["viz"] = str(exc)[:120]
     return reports
+
+
+def _annotate_domains(graph_file: Path) -> None:
+    """Etiqueta cada nodo con su dominio (1er nivel de source_file relativo a raw)."""
+    data = json.loads(graph_file.read_text())
+    raw_root = settings.data_dir / "raw"
+    domains: dict[str, int] = {}
+    for n in data.get("nodes", []):
+        sf = str(n.get("source_file", ""))
+        rel = sf
+        try:
+            p = Path(sf)
+            if p.is_absolute():
+                # relativo a data/raw si cuelga de él; si no, relativo al repo
+                try:
+                    rel = str(p.relative_to(raw_root))
+                except ValueError:
+                    repo = Path(__file__).resolve().parents[2]
+                    try:
+                        rel = str(p.relative_to(repo))
+                    except ValueError:
+                        rel = p.name
+        except (OSError, ValueError):
+            rel = sf
+        parts = rel.replace("\\", "/").split("/")
+        domain = parts[0] if parts and parts[0] not in ("", ".") else "root"
+        n["domain"] = domain
+        domains[domain] = domains.get(domain, 0) + 1
+    graph_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    (graph_file.parent / "domains.json").write_text(
+        json.dumps({"domains": dict(sorted(domains.items())), "total_nodes": len(data.get("nodes", []))},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    log.info("grafo anotado con %d dominios: %s", len(domains), list(domains))
 
 
 def graph_stats(graph_path: Path) -> dict:
