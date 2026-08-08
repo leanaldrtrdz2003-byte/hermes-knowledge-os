@@ -1,0 +1,52 @@
+# ============================================================
+# Hermes Knowledge OS — .gitignore
+# Lo generado/regenerable NO se versiona: solo repo + docs + estructura.
+# ============================================================
+
+# ── Secretos — nunca en git ──────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Datos locales: fuentes, staging, backups, caches ────────
+data/
+*.sqlite3
+*.duckdb
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ── Entornos Python ─────────────────────────────────────────
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# ── Artefactos de motores (regenerables) ────────────────────
+graphify-out/
+graphify-out-*/
+lightrag_workspace/
+*.bin
+
+# ── Vault: solo se versiona estructura + docs; lo compilado ─
+vault/00_SYSTEM/BENCHMARK.md
+vault/00_SYSTEM/DASHBOARD.md
+vault/02_WIKI/generated/
+vault/03_SOURCES/raw/
+vault/04_GRAPH/exports/
+vault/05_MEMORY/semantic/
+vault/.obsidian/workspace.json
+vault/.obsidian/workspace-mobile.json
+
+# ── Node / npm ──────────────────────────────────────────────
+node_modules/
+
+# ── Logs / OS / IDE ─────────────────────────────────────────
+logs/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

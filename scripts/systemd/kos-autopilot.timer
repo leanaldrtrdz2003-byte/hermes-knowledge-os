@@ -1,0 +1,11 @@
+[Unit]
+Description=Disparo diario del autopiloto del Knowledge OS (03:30)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=kos-autopilot.service
+
+[Install]
+WantedBy=timers.target

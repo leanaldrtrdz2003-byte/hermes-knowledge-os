@@ -1,0 +1,71 @@
+# Hermes Knowledge OS — docker-compose
+# Infraestructura mínima justificada (§35): PostgreSQL (metadatos), Qdrant (vectores), MinIO (fuentes).
+# No se añaden Redis/Kafka/Neo4j/Prometheus/Grafana sin medición que lo justifique (§62).
+name: hermes-knowledge-os
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: kos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-knowledge_os}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kos} -d ${POSTGRES_DB:-knowledge_os}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [kos-net]
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    container_name: kos-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT__SERVICE__ENABLE_TLS: "false"
+    ports:
+      - "6333:6333"   # REST/gRPC
+      - "6334:6334"   # interno gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e \"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n\" >&3 && cat <&3 | grep -q 200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    container_name: kos-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:
+  qdrant_data:
+  minio_data:
+
+networks:
+  kos-net:
+    driver: bridge
