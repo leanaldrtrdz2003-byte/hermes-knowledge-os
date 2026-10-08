@@ -50,3 +50,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ── Higiene sync-auditoria (personales / regenerables) ─────────
+.atl/
+*.bak
+vault/10_RASHIN/
+vault/.obsidian/snippets/
+vault/.obsidian/appearance.json

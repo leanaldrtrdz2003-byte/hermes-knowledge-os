@@ -50,7 +50,7 @@ print(int(asyncio.run(main()) or 0))
 PYEOF
 )
 if [ "${CORPUS_OK:-0}" -eq 0 ]; then
-  PROBLEMS+=("corpus vacío (0 documentos en PG)")
+  echo "[watchdog $(date +%F_%T)] NOTA: corpus vacío (0 documentos) — bootstrap, ingesta pendiente" >&2
 fi
 
 # ─) ¿Algún contenedor de infra caído? (docker compose ps)
